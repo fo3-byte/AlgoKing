@@ -271,34 +271,64 @@ async function handleCommand(text: string) {
     }
 
     case "/scan": {
-      await sendTg("🔍 _Scanning BTC + ETH options..._");
+      await sendTg("🔍 _Running 5-layer algo scan on BTC + ETH + NIFTY + BANKNIFTY..._");
       try {
-        const scan = await selfFetch("/api/delta-scanner?action=scan");
-        const lines = [
-          `🔍 *Options Scan*`,
-          ``,
-          `BTC: $${scan.btcPrice?.toLocaleString()} | ETH: $${scan.ethPrice?.toLocaleString()}`,
-          `Bias: ${scan.bias} | Big move: ${scan.isBigMove ? "YES" : "No"}`,
-          `Total options: ${scan.totalOptions} | Cheap: ${scan.cheapOptions}`,
-        ];
+        // Run both scanners in parallel
+        const [cryptoScan, indiaScan] = await Promise.allSettled([
+          selfFetch("/api/delta-scanner?action=scan"),
+          selfFetch("/api/india-scanner?action=scan"),
+        ]);
 
-        if (scan.directionalPicks?.length > 0) {
-          lines.push(`\n🎯 *Picks:*`);
-          for (const p of scan.directionalPicks.slice(0, 5)) {
-            lines.push(`  ${p.symbol} | $${p.ask} | ${p.type}`);
+        const crypto = cryptoScan.status === "fulfilled" ? cryptoScan.value : {};
+        const india = indiaScan.status === "fulfilled" ? indiaScan.value : {};
+
+        const lines = [`🔍 *AlgoKing Full Scan*\n`];
+
+        // Crypto section
+        if (crypto.btc) {
+          lines.push(`💎 *CRYPTO*`);
+          lines.push(`₿ BTC: $${crypto.btc.price?.toLocaleString() || "?"} | RSI: ${crypto.btc.rsi?.toFixed(0) || "?"} | ${crypto.btc.bias || "?"}`);
+          lines.push(`Ξ ETH: $${crypto.eth?.price?.toLocaleString() || "?"} | RSI: ${crypto.eth?.rsi?.toFixed(0) || "?"} | ${crypto.eth?.bias || "?"}`);
+          lines.push(`Options: ${crypto.totalOptions || 0} | Signals >60%: ${crypto.signalsAbove60 || 0}`);
+
+          if (crypto.topSignals?.length > 0) {
+            lines.push(`\n🎯 *Crypto Signals:*`);
+            for (const s of crypto.topSignals.slice(0, 3)) {
+              lines.push(`  ${s.symbol} | Score: ${(s.score * 100).toFixed(0)}% | ${s.direction}`);
+              lines.push(`  _${s.reason.slice(0, 80)}_`);
+            }
+          } else {
+            lines.push(`  No signals above threshold — algo is waiting for A+ setup`);
+          }
+        } else if (crypto.error) {
+          lines.push(`💎 Crypto: ⚠️ ${crypto.error}`);
+        }
+
+        // India section
+        if (india.nifty) {
+          lines.push(`\n🇮🇳 *INDIAN MARKETS*`);
+          lines.push(`NIFTY: ₹${india.nifty.price?.toLocaleString() || "?"} | RSI: ${india.nifty.rsi?.toFixed(0) || "?"} | ${india.nifty.bias || "?"}`);
+          lines.push(`BANKNIFTY: ₹${india.banknifty?.price?.toLocaleString() || "?"} | RSI: ${india.banknifty?.rsi?.toFixed(0) || "?"} | ${india.banknifty?.bias || "?"}`);
+          lines.push(`VIX: ${india.vix?.toFixed(1) || "?"} | Market: ${india.marketHours ? "OPEN" : "CLOSED"}`);
+
+          if (india.signals?.length > 0) {
+            lines.push(`\n🎯 *India Signals:*`);
+            for (const s of india.signals.slice(0, 3)) {
+              lines.push(`  ${s.instrument} | Score: ${(s.score * 100).toFixed(0)}% | ${s.direction}`);
+              lines.push(`  _${s.reason.slice(0, 80)}_`);
+            }
+          } else {
+            lines.push(`  No signals — algo waiting`);
           }
         }
-        if (scan.lotteryTickets?.length > 0) {
-          lines.push(`\n🎰 *Lottery (<$5):* ${scan.lotteryTickets.length} found`);
-        }
-        if (!scan.directionalPicks?.length && !scan.lotteryTickets?.length) {
-          lines.push(`\n⏳ No cheap options with bid/ask right now.`);
-          lines.push(`Market makers are offline. Try during US hours (7PM-2AM IST).`);
+
+        if (lines.length <= 2) {
+          lines.push("⚠️ Could not reach scanners. Try again.");
         }
 
         await sendTg(lines.join("\n"));
-      } catch {
-        await sendTg("⚠️ Scanner error.");
+      } catch (e) {
+        await sendTg(`⚠️ Scanner error: ${String(e).slice(0, 150)}`);
       }
       break;
     }

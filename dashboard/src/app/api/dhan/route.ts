@@ -170,6 +170,15 @@ export async function POST(req: NextRequest) {
         // Verify by hitting funds endpoint
         const verify = await dhanRequest("/fundlimit");
         if (verify.ok) {
+          // Auto-trigger India scanner + alert on Telegram
+          try {
+            fetch(`https://algomaster-pro.vercel.app/api/india-scanner?action=scan&auto=true`, { cache: "no-store" }).catch(() => {});
+            fetch(`https://api.telegram.org/bot8440970690:AAFOHoVTCw6Gyx4Mla7Q4pOUnfzeb8fDDoE/sendMessage`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ chat_id: "6776228988", text: `✅ *Dhan Connected!*\n\nClient: ${clientId}\nBalance: ₹${JSON.stringify(verify.data).includes("availabelBalance") ? (verify.data as Record<string,unknown>).availabelBalance : "?"}\n\n🔍 Running India market scan automatically...\nType /scan for full analysis.`, parse_mode: "Markdown" }),
+            }).catch(() => {});
+          } catch { /* non-blocking */ }
           return NextResponse.json({ connected: true, clientId, message: "Dhan connected successfully" });
         }
         // Reset on failure
