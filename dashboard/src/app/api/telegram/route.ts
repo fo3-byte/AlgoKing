@@ -17,17 +17,23 @@ async function sendTg(text: string, parseMode = "Markdown") {
   return res.json();
 }
 
-// ── Helper: fetch from our own API ──
+// ── Helper: fetch from our own API (tries local first, then Vercel) ──
 async function selfFetch(path: string, body?: Record<string, unknown>) {
-  const url = `${DASHBOARD_URL}${path}`;
-  const opts: RequestInit = { cache: "no-store" };
-  if (body) {
-    opts.method = "POST";
-    opts.headers = { "Content-Type": "application/json" };
-    opts.body = JSON.stringify(body);
+  const bases = ["http://localhost:3000", DASHBOARD_URL];
+  for (const base of bases) {
+    try {
+      const url = `${base}${path}`;
+      const opts: RequestInit = { cache: "no-store" };
+      if (body) {
+        opts.method = "POST";
+        opts.headers = { "Content-Type": "application/json" };
+        opts.body = JSON.stringify(body);
+      }
+      const res = await fetch(url, opts);
+      if (res.ok) return res.json();
+    } catch { /* try next */ }
   }
-  const res = await fetch(url, opts);
-  return res.json();
+  return { error: "Could not reach dashboard" };
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -146,19 +152,27 @@ async function handleCommand(text: string) {
       await sendTg([
         `👑 *AlgoKing Bot*`,
         ``,
-        `Available commands:`,
-        ``,
-        `/status — Dashboard & Dhan connection status`,
-        `/positions — Open positions on Dhan`,
-        `/orders — Today's orders on Dhan`,
-        `/funds — Account balance & margins`,
+        `*Indian Markets (Dhan):*`,
+        `/status — All account statuses`,
+        `/positions — Open positions (Dhan)`,
+        `/orders — Today's orders (Dhan)`,
+        `/funds — Account balance`,
         `/pnl — Today's P&L`,
-        `/signals — Latest algo signals`,
-        `/market — NIFTY, BANKNIFTY, key levels`,
-        `/deploy — Deploy workflow (coming soon)`,
-        `/squareoff — Square off all positions`,
+        `/market — NIFTY, BANKNIFTY, VIX`,
+        `/squareoff — Square off all Dhan positions`,
         ``,
-        `🔗 [Open Dashboard](${DASHBOARD_URL})`,
+        `*Crypto (Delta Exchange):*`,
+        `/crypto — BTC + ETH prices & positions`,
+        `/delta — Delta Exchange wallet & positions`,
+        `/scan — Scan for cheap BTC/ETH options NOW`,
+        `/buy — Buy crypto option (e.g. /buy C-BTC-70000-030426 5)`,
+        `/sell — Sell/close position (e.g. /sell C-BTC-70000-030426 5)`,
+        `/closeall — Close all Delta positions`,
+        ``,
+        `*Or just talk to me naturally:*`,
+        `"Buy ETH puts", "What's BTC doing?", "Find me a trade"`,
+        ``,
+        `🔗 [Dashboard](${DASHBOARD_URL})`,
       ].join("\n"));
       break;
     }
@@ -166,17 +180,224 @@ async function handleCommand(text: string) {
     case "/status": {
       try {
         const dhan = await selfFetch("/api/dhan?action=status");
+        const delta = await selfFetch("/api/delta?action=status");
         const dhanStatus = dhan.connected ? `✅ Connected (${dhan.clientId})` : `❌ Not connected`;
+        const deltaStatus = delta.connected ? `✅ Connected` : `❌ Not connected`;
+
+        let deltaWallet = "";
+        if (delta.connected) {
+          const w = await selfFetch("/api/delta?action=wallet");
+          deltaWallet = w.meta ? `\n   Equity: $${parseFloat(w.meta.net_equity).toFixed(2)}` : "";
+        }
 
         await sendTg([
           `📊 *System Status*`,
           ``,
           `🏦 Dhan: ${dhanStatus}`,
+          `💎 Delta: ${deltaStatus}${deltaWallet}`,
           `🌐 Dashboard: ✅ Online`,
-          `🔗 [Open Dashboard](${DASHBOARD_URL})`,
+          `🔗 [Dashboard](${DASHBOARD_URL})`,
         ].join("\n"));
       } catch {
-        await sendTg("⚠️ Could not reach dashboard. Is it running?");
+        await sendTg("⚠️ Could not reach dashboard.");
+      }
+      break;
+    }
+
+    case "/crypto": {
+      try {
+        const scan = await selfFetch("/api/delta-scanner?action=scan");
+        const delta = await selfFetch("/api/delta?action=positions");
+        const positions = delta.result || [];
+        const openPos = positions.filter((p: { size?: string }) => parseFloat(p.size || "0") > 0);
+
+        let posLines = "No open positions";
+        if (openPos.length > 0) {
+          posLines = openPos.map((p: { product_symbol?: string; size?: string; entry_price?: string; unrealized_pnl?: string }) => {
+            const pnl = parseFloat(p.unrealized_pnl || "0");
+            return `${pnl >= 0 ? "🟢" : "🔴"} ${p.product_symbol} | ${p.size}x @ $${p.entry_price} | PnL: $${pnl.toFixed(2)}`;
+          }).join("\n");
+        }
+
+        await sendTg([
+          `💎 *Crypto Markets*`,
+          ``,
+          `₿ BTC: $${scan.btcPrice?.toLocaleString() || "?"} (${scan.btc24hChange >= 0 ? "+" : ""}${scan.btc24hChange?.toFixed(1) || "0"}%)`,
+          `Ξ ETH: $${scan.ethPrice?.toLocaleString() || "?"}`,
+          `Bias: ${scan.bias || "?"}`,
+          `Options available: ${scan.totalOptions || 0}`,
+          ``,
+          `📊 *Positions:*`,
+          posLines,
+        ].join("\n"));
+      } catch (e) {
+        await sendTg(`⚠️ Error: ${String(e).slice(0, 200)}`);
+      }
+      break;
+    }
+
+    case "/delta": {
+      try {
+        const wallet = await selfFetch("/api/delta?action=wallet");
+        const positions = await selfFetch("/api/delta?action=positions");
+
+        if (wallet.meta) {
+          const equity = parseFloat(wallet.meta.net_equity).toFixed(2);
+          const openPos = (positions.result || []).filter((p: { size?: string }) => parseFloat(p.size || "0") > 0);
+
+          let posLines = "No open positions";
+          if (openPos.length > 0) {
+            posLines = openPos.map((p: { product_symbol?: string; size?: string; entry_price?: string; unrealized_pnl?: string }) => {
+              const pnl = parseFloat(p.unrealized_pnl || "0");
+              return `  ${pnl >= 0 ? "🟢" : "🔴"} ${p.product_symbol}\n    ${p.size}x @ $${p.entry_price} | PnL: $${pnl.toFixed(2)}`;
+            }).join("\n");
+          }
+
+          await sendTg([
+            `💎 *Delta Exchange*`,
+            ``,
+            `💰 Equity: $${equity}`,
+            ``,
+            `📊 Positions:`,
+            posLines,
+          ].join("\n"));
+        } else {
+          await sendTg("⚠️ Delta not connected. Check API keys.");
+        }
+      } catch {
+        await sendTg("⚠️ Delta not reachable.");
+      }
+      break;
+    }
+
+    case "/scan": {
+      await sendTg("🔍 _Scanning BTC + ETH options..._");
+      try {
+        const scan = await selfFetch("/api/delta-scanner?action=scan");
+        const lines = [
+          `🔍 *Options Scan*`,
+          ``,
+          `BTC: $${scan.btcPrice?.toLocaleString()} | ETH: $${scan.ethPrice?.toLocaleString()}`,
+          `Bias: ${scan.bias} | Big move: ${scan.isBigMove ? "YES" : "No"}`,
+          `Total options: ${scan.totalOptions} | Cheap: ${scan.cheapOptions}`,
+        ];
+
+        if (scan.directionalPicks?.length > 0) {
+          lines.push(`\n🎯 *Picks:*`);
+          for (const p of scan.directionalPicks.slice(0, 5)) {
+            lines.push(`  ${p.symbol} | $${p.ask} | ${p.type}`);
+          }
+        }
+        if (scan.lotteryTickets?.length > 0) {
+          lines.push(`\n🎰 *Lottery (<$5):* ${scan.lotteryTickets.length} found`);
+        }
+        if (!scan.directionalPicks?.length && !scan.lotteryTickets?.length) {
+          lines.push(`\n⏳ No cheap options with bid/ask right now.`);
+          lines.push(`Market makers are offline. Try during US hours (7PM-2AM IST).`);
+        }
+
+        await sendTg(lines.join("\n"));
+      } catch {
+        await sendTg("⚠️ Scanner error.");
+      }
+      break;
+    }
+
+    case "/buy": {
+      const parts = text.split(/\s+/);
+      if (parts.length < 2) {
+        await sendTg("Usage: /buy SYMBOL SIZE [PRICE]\nExample: `/buy C-BTC-70000-030426 5`\nOr: `/buy C-BTC-70000-030426 5 10.50`");
+        break;
+      }
+      const symbol = parts[1];
+      const size = parseInt(parts[2] || "1");
+      const price = parts[3] ? parseFloat(parts[3]) : undefined;
+
+      await sendTg(`📦 _Placing order: Buy ${size}x ${symbol}${price ? ` @ $${price}` : " at market"}..._`);
+      try {
+        const orderBody: Record<string, unknown> = {
+          action: "place-order",
+          productSymbol: symbol,
+          size,
+          side: "buy",
+          orderType: price ? "limit_order" : "market_order",
+          timeInForce: price ? "gtc" : "ioc",
+          clientOrderId: `tg_buy_${Date.now()}`,
+        };
+        if (price) orderBody.limitPrice = String(price);
+
+        const result = await selfFetch("/api/delta", orderBody);
+        if (result.success !== false && result.result) {
+          const oid = result.result.id || "?";
+          const state = result.result.state || "?";
+          await sendTg(`✅ *Order Placed*\n\nBuy ${size}x ${symbol}\nOrder ID: \`${oid}\`\nState: ${state}`);
+        } else {
+          await sendTg(`❌ Order failed: ${JSON.stringify(result.error || result).slice(0, 300)}`);
+        }
+      } catch (e) {
+        await sendTg(`❌ Error: ${String(e).slice(0, 200)}`);
+      }
+      break;
+    }
+
+    case "/sell": {
+      const parts = text.split(/\s+/);
+      if (parts.length < 2) {
+        await sendTg("Usage: /sell SYMBOL SIZE [PRICE]\nExample: `/sell C-BTC-70000-030426 5`");
+        break;
+      }
+      const symbol = parts[1];
+      const size = parseInt(parts[2] || "1");
+      const price = parts[3] ? parseFloat(parts[3]) : undefined;
+
+      await sendTg(`📦 _Selling ${size}x ${symbol}..._`);
+      try {
+        const orderBody: Record<string, unknown> = {
+          action: "place-order",
+          productSymbol: symbol,
+          size,
+          side: "sell",
+          orderType: price ? "limit_order" : "market_order",
+          timeInForce: price ? "gtc" : "ioc",
+          reduceOnly: true,
+          clientOrderId: `tg_sell_${Date.now()}`,
+        };
+        if (price) orderBody.limitPrice = String(price);
+
+        const result = await selfFetch("/api/delta", orderBody);
+        if (result.success !== false && result.result) {
+          await sendTg(`✅ *Sold*\n\n${size}x ${symbol}\nOrder: \`${result.result.id}\` | ${result.result.state}`);
+        } else {
+          await sendTg(`❌ Sell failed: ${JSON.stringify(result.error || result).slice(0, 300)}`);
+        }
+      } catch (e) {
+        await sendTg(`❌ Error: ${String(e).slice(0, 200)}`);
+      }
+      break;
+    }
+
+    case "/closeall": {
+      await sendTg("🔴 _Closing all Delta positions..._");
+      try {
+        const positions = await selfFetch("/api/delta?action=positions");
+        const openPos = (positions.result || []).filter((p: { size?: string }) => parseFloat(p.size || "0") > 0);
+
+        if (openPos.length === 0) {
+          await sendTg("📋 No open positions to close.");
+          break;
+        }
+
+        let closed = 0;
+        for (const p of openPos) {
+          const result = await selfFetch("/api/delta", {
+            action: "close-position",
+            productId: p.product_id || p.product?.id,
+          });
+          if (result.success !== false) closed++;
+        }
+        await sendTg(`✅ Closed ${closed}/${openPos.length} positions.`);
+      } catch {
+        await sendTg("⚠️ Error closing positions.");
       }
       break;
     }
@@ -298,14 +519,48 @@ async function handleCommand(text: string) {
         break;
       }
 
-      // ── Natural language → AI Chat ──
+      // ── Natural language → AI Chat with full context ──
       await sendTg("🤔 _Thinking..._");
       try {
+        // Fetch account context to inject into AI
+        let accountContext = "";
+        try {
+          const [deltaPos, deltaWallet, scan, dhanStatus] = await Promise.allSettled([
+            selfFetch("/api/delta?action=positions"),
+            selfFetch("/api/delta?action=wallet"),
+            selfFetch("/api/delta-scanner?action=scan"),
+            selfFetch("/api/dhan?action=status"),
+          ]);
+
+          const dp = deltaPos.status === "fulfilled" ? deltaPos.value : {};
+          const dw = deltaWallet.status === "fulfilled" ? deltaWallet.value : {};
+          const sc = scan.status === "fulfilled" ? scan.value : {};
+          const ds = dhanStatus.status === "fulfilled" ? dhanStatus.value : {};
+
+          accountContext = `\n\n--- ACCOUNT CONTEXT (live) ---
+DELTA EXCHANGE (Crypto):
+Equity: $${dw.meta?.net_equity || "?"}
+BTC: $${sc.btcPrice || "?"} | ETH: $${sc.ethPrice || "?"}
+Open positions: ${JSON.stringify((dp.result || []).filter((p: {size?: string}) => parseFloat(p.size || "0") > 0).map((p: {product_symbol?: string; size?: string; entry_price?: string; unrealized_pnl?: string}) => `${p.product_symbol} ${p.size}x @ $${p.entry_price} PnL:$${p.unrealized_pnl}`))}
+Available options: ${sc.totalOptions || 0}
+
+DHAN (Indian Markets):
+Connected: ${ds.connected || false}
+
+IMPORTANT: You can execute trades on Delta Exchange. When the user asks to buy/sell crypto options, respond with the EXACT command they should send:
+- To buy: /buy SYMBOL SIZE [PRICE]
+- To sell: /sell SYMBOL SIZE
+- To scan: /scan
+- To check positions: /delta
+You can also analyze and recommend specific options based on the current market data.
+Capital management: Never risk more than 20% ($20) on one trade. Total account: ~$118.`;
+        } catch { /* context fetch failed, continue without */ }
+
         const chatRes = await fetch(`${DASHBOARD_URL}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            messages: [{ role: "user", content: text }],
+            messages: [{ role: "user", content: text + accountContext }],
           }),
         });
 
